@@ -74,7 +74,7 @@ class TikzMagics(Magics):
         self._publish_display_data = publish_display_data
  
  
-    def _fix_gnuplot_svg_size(self, image, size=None):
+    def _fix_gnuplot_svg_size(self, image, size=None, id=None):
         """
         GnuPlot SVGs do not have height/width attributes.  Set
         these to be the same as the viewBox, so that the browser
@@ -94,14 +94,18 @@ class TikzMagics(Magics):
         if size is not None:
             width, height = size
         else:
-            width, height = viewbox[2:]
+            width, height = (float(x) for x in viewbox[2:])
  
-        svg.setAttribute('width', '%dpx' % width)
-        svg.setAttribute('height', '%dpx' % height)
+        svg.setAttribute('width', '%fpt' % width)
+        svg.setAttribute('height', '%fpt' % height)
+        
+        if id and len(id.strip()) > 0:
+            svg.setAttribute('id', id)
+        
         return svg.toxml()
 
 
-    def _run_latex(self, code, encoding, dir):
+    def _run_latex(self, code, encoding, dir, latex_exe):
         f = open(dir + '/tikz.tex', 'w', encoding=encoding)
         f.write(code)
         f.close()
@@ -123,7 +127,7 @@ class TikzMagics(Magics):
             # search path (otherwise we would lose access to all packages)
 
         try:
-            retcode = call("pdflatex --shell-escape tikz.tex", shell=True, env=env)
+            retcode = call("%s --shell-escape tikz.tex" % latex_exe, shell=True, env=env)
             if retcode != 0:
                 print("LaTeX terminated with signal", -retcode, file=sys.stderr)
                 ret_log = True
@@ -159,6 +163,24 @@ class TikzMagics(Magics):
         chdir(current_dir)
         
  
+    def _convert_dvi_to_svg(self, dir, imagescale):
+        current_dir = getcwd()
+        chdir(dir)
+        
+        try:
+            # For explanation of arguments used, see:
+            # the -b papersize option ensures correct bounding box, https://tex.stackexchange.com/a/338887/22079
+            # the --font-format=woff option gives best brwoser compatibility http://dvisvgm.bplaced.net/FAQ
+            # the --scale option scales the resulting SVG, and gives more consistent results than scaling the tikzpicture
+            retcode = call("dvisvgm --font-format=woff -b papersize --scale=%s tikz.dvi tikz.svg" % imagescale, shell=True)
+            if retcode != 0:
+                print("dvisvgm terminated with signal", -retcode, file=sys.stderr)
+        except OSError as e:
+            print("dvisvgm execution failed:", e, file=sys.stderr)
+        
+        chdir(current_dir)
+
+        
     def _convert_png_to_jpg(self, dir, imagemagick_path):
         current_dir = getcwd()
         chdir(dir)
@@ -226,7 +248,16 @@ class TikzMagics(Magics):
     @argument('--tikzoptions', action='store', type=str, default='',
         help='Options to pass when loading TikZ or CircuiTikZ package.'
         )
+        
+    @argument('--dvisvgm', action='store_true',
+        help='Use dvisvgm to generate SVG output (forces --format svg)')
 
+    @argument('-is', '--imagescale', action='store', type=str, default='1',
+        help='Scale to apply to the final image (dvisvgm mode only), may be an integer or pair of sx,sy')
+        
+    @argument('-id', '--svgid', action='store', type=str, default='',
+        help='id of generated SVG object')
+        
     @needs_local_scope
     @argument(
         'code',
@@ -298,6 +329,13 @@ class TikzMagics(Magics):
         plot_dir = tempfile.mkdtemp().replace('\\', '/')
         
         add_params = ""
+
+        # use dvisvgm to generate SVG output, overriding plot format
+        if args.dvisvgm:
+            plot_format = 'svg'
+            latex_exe = 'latex'
+        else:
+            latex_exe = 'pdflatex'
         
         if plot_format == 'png' or plot_format == 'jpg' or plot_format == 'jpeg':
             add_params += "density=300,"
@@ -311,7 +349,15 @@ class TikzMagics(Magics):
             tikz_package = 'tikz'
             
         tex = []
-        tex.append('''
+        if args.dvisvgm:
+            tex.append('''
+\\documentclass[border=1pt]{standalone}
+        ''' % locals())
+            # tex.append('''
+# \\documentclass[dvisvgm,border=1pt]{standalone}
+        # ''' % locals())
+        else:
+            tex.append('''
 \\documentclass[convert={convertexe={%(imagemagick_path)s},%(add_params)ssize=%(width)sx%(height)s,outext=.png},border=0pt]{standalone}
         ''' % locals())
 
@@ -350,7 +396,7 @@ class TikzMagics(Magics):
             print(code)
             return
 
-        latex_log = self._run_latex(code, encoding, plot_dir)
+        latex_log = self._run_latex(code, encoding, plot_dir, latex_exe)
         
         key = 'TikZMagic.Tikz'
         display_data = []
@@ -364,7 +410,10 @@ class TikzMagics(Magics):
         if plot_format == 'jpg' or plot_format == 'jpeg':
             self._convert_png_to_jpg(plot_dir, imagemagick_path)
         elif plot_format == 'svg':
-            self._convert_pdf_to_svg(plot_dir)
+            if args.dvisvgm:
+                self._convert_dvi_to_svg(plot_dir, args.imagescale)
+            else:
+                self._convert_pdf_to_svg(plot_dir)
 
         image_filename = "%s/tikz.%s" % (plot_dir, plot_format)
         
@@ -374,7 +423,11 @@ class TikzMagics(Magics):
             plot_mime_type = _mimetypes.get(plot_format, 'image/%s' % (plot_format))
             width, height = [int(s) for s in size.split(',')]
             if plot_format == 'svg':
-                image = self._fix_gnuplot_svg_size(image, size=(width, height))
+                if args.dvisvgm:
+                    # let the SVG size be determined by the tikz picture size
+                    image = self._fix_gnuplot_svg_size(image, id=args.svgid)
+                else:
+                    image = self._fix_gnuplot_svg_size(image, size=(width, height), id=args.svgid)
             display_data.append((key, {plot_mime_type: image}))
  
         except IOError:
@@ -387,8 +440,9 @@ class TikzMagics(Magics):
         rmtree(plot_dir)
  
         for tag, disp_d in display_data:
-            if plot_format == 'svg':
-                # isolate data in an iframe, to prevent clashing glyph declarations in SVG 
+            if plot_format == 'svg' and not args.dvisvgm:
+                # isolate data in an iframe, to prevent clashing glyph declarations in SVG
+                # not necessary when using dvisvgm??
                 self._publish_display_data(source=tag, data=disp_d, metadata={'isolated' : 'true'})
             else:
                 self._publish_display_data(source=tag, data=disp_d, metadata=None)
