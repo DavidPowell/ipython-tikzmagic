@@ -440,9 +440,9 @@ class TikzMagics(Magics):
         rmtree(plot_dir)
  
         for tag, disp_d in display_data:
-            if plot_format == 'svg' and not args.dvisvgm:
+            if plot_format == 'svg':
                 # isolate data in an iframe, to prevent clashing glyph declarations in SVG
-                # not necessary when using dvisvgm??
+                # still necessary when using dvisvgm due to conflicting CSS definitions
                 self._publish_display_data(source=tag, data=disp_d, metadata={'isolated' : 'true'})
             else:
                 self._publish_display_data(source=tag, data=disp_d, metadata=None)
